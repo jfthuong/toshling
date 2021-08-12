@@ -3,15 +3,17 @@ import os
 import pprint  # pylint: disable=unused-import  # for testing
 import re
 import shutil
+from argparse import ArgumentParser
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Dict, List, Set, Tuple, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Type, Union
 
 import requests
 import statham.schema.parser
 import statham.serializers.python
 from jinja2 import Template
 from json_ref_dict import RefDict, materialize
+from statham.schema.elements import Object
 from statham.titles import title_labeller
 
 API_SCHEMA = "https://api2.toshl.com/schema/"
@@ -151,129 +153,124 @@ def get_python_schema(schema_dir:Path) -> PythonSchema:
 
     return schema
 
+Crumb = Tuple[str, ...]
+Method = str
+Href = str
+Argument = Optional[Type[Object]]
+ReturnType = Optional[Type[Object]]
+ListAPIMethods = List[Tuple[Crumb, Method, Href, Argument, ReturnType]]
+APIMethod = Dict[str, Union[Method, Href, Argument, ReturnType]]
+DictAPIMethods = Dict[Crumb, APIMethod]
 
-# After downloading the schema from Toshl API we will have to do some cleaning
-# (some types need to be modified, some json are missing, etc.)
-original_schema_path = Path('schemas/original/')
-fixed_schema_path = Path('schemas/fixed')
 
-shutil.rmtree('schemas/', ignore_errors=True)
-download_schema(original_schema_path)
-fix_schema(original_schema_path, fixed_schema_path)
+def get_api_methods(schema:PythonSchema) -> ListAPIMethods:
+    """Retrieve the API Methods from the schema and by using Returned Types"""
+    # Import our new return types.
+    import toshling.models.return_types
 
-schema = get_python_schema(fixed_schema_path)
+    api_methods: ListAPIMethods = []
+    for n, s in schema['definitions'].items():
+        # Get links
+        # (handle the extra crap statham puts into the definitions object)
+        links = []
+        try:
+            links = s.get("links", [])
+        except Exception:
+            pass
 
-returns = statham.schema.parser.parse(schema)
-returns_path = Path('toshling/models/return_types.py')
-returns_path.write_text(statham.serializers.python.serialize_python(*returns))
+        for link in links:
+            href = link["href"]
 
-# Import our new return types.
-import toshling.models.return_types
+            method = link.get("method", "GET")
 
-# Iterate the LDOs from all schemas, with the aim of
-# automatically discovering all API methods
-api_methods = []
-for n, s in schema['definitions'].items():
-    # Get links (handle the extra crap statham puts into the definitions object)
-    links = []
-    try:
-        links = s.get("links", [])
-    except Exception:
-        pass
-
-    for link in links:
-        href = link["href"]
-
-        method = link.get("method", "GET")
-
-        crumbs = [
-            crumb.split('?')[0]
-            for crumb in href.split('/')
-            if crumb and crumb[0] != "{"
-        ]
-        crumbs.append(link["rel"])
-        if crumbs[-1] == "self":
-            crumbs[-1] = "get"
-        if crumbs[-1] == crumbs[-2]:
-            crumbs = crumbs[:-1]
-        
-        # Get the argument type.
-        argument = None
-        if "schema" in link:
-            # Sub in a sensible title and parse the argument structure.
-            link["schema"]["title"] = '.'.join(crumbs + ["argument"])
-            argument = statham.schema.parser.parse_element(link['schema'])
-
-            # Toshl uses `!attribute` a bunch, which statham turns into
-            # `exclamation_mark_attribute`. Change these to `not_attribute`
-            negated_keys = [
-                key for key in argument.properties if key[:16] == "exclamation_mark"
+            crumbs = [
+                crumb.split('?')[0]
+                for crumb in href.split('/')
+                if crumb and crumb[0] != "{"
             ]
-            for negated_key in negated_keys:
-                not_key = "not" + negated_key[16:]
-                argument.properties[not_key] = argument.properties.pop(negated_key)
-
-        # Try guess some return types.
-        return_ = None
-        if crumbs[-1] in {'get', 'list', 'update'}:
-            guesses = []
+            crumbs.append(link["rel"])
+            if crumbs[-1] == "self":
+                crumbs[-1] = "get"
+            if crumbs[-1] == crumbs[-2]:
+                crumbs = crumbs[:-1]
             
-            guesses.append(s['title'])
+            # Get the argument type.
+            argument = None
+            if "schema" in link:
+                # Sub in a sensible title and parse the argument structure.
+                link["schema"]["title"] = '.'.join(crumbs + ["argument"])
+                argument = statham.schema.parser.parse_element(link['schema'])
 
-            class_parts = [p.capitalize() for p in n.split('.')]
-            if class_parts[-1] in {'List'}:
-                class_parts = class_parts[:-1]
-            guesses.append(''.join(class_parts))
+                # Toshl uses `!attribute` a bunch, which statham turns into
+                # `exclamation_mark_attribute`. Change these to `not_attribute`
+                negated_keys = [
+                    key for key in argument.properties if key[:16] == "exclamation_mark"
+                ]
+                for negated_key in negated_keys:
+                    not_key = "not" + negated_key[16:]
+                    argument.properties[not_key] = argument.properties.pop(negated_key)
 
-            for guess in guesses:
-                try:
-                    return_ = getattr(toshling.models.return_types, guess)
-                    break
-                except Exception as e:
-                    pass
+            # Try guess some return types.
+            return_ = None
+            if crumbs[-1] in {'get', 'list', 'update'}:
+                guesses = []
+                
+                guesses.append(s['title'])
 
-        api_methods.append((tuple(crumbs), method, href, argument, return_))
+                class_parts = [p.capitalize() for p in n.split('.')]
+                if class_parts[-1] in {'List'}:
+                    class_parts = class_parts[:-1]
+                guesses.append(''.join(class_parts))
 
-# Toshl has a lot of duplicate method/endpoint pairs, lots of which are invalid.
-# We will take only those with the longest crumbs
-# (which usually means there is a verb on the end).
-# Also discard/modify/add methods we know need modifying.
-discard = {
-    ('accounts', 'account'),
-    ('budgets', 'budget'),
-    ('categories', 'category'),
-    ('entries', 'entry'),
-    ('entries', 'locations', 'location'),
-    ('entries', 'transactions'),
-    ('entries', 'transactions', 'repeats', 'repeating transactions'),
-    ('entries', 'transaction_pair'),
-    ('months', 'month')
-}
-modify = {
+                for guess in guesses:
+                    try:
+                        return_ = getattr(toshling.models.return_types, guess)
+                        break
+                    except Exception as e:
+                        pass
 
-}
-add = {
+            api_methods.append((tuple(crumbs), method, href, argument, return_))
 
-}
-seen = set()
-filtered_api_methods = {}
-sorted_apis = sorted(api_methods, key=lambda x: (x[2].split('?')[0], x[1], -len(x[0])))
-for crumbs, method, href, arg, ret in sorted_apis:
-    key = (href.split('?')[0], method)
-    if key not in seen and crumbs not in discard:
-        api_method = {'method': method, 'href': href, 'argument': arg, 'return': ret}
-        api_method.update(modify.get(crumbs, {}))
-        filtered_api_methods[crumbs] = api_method
-    seen.add(key)
-filtered_api_methods.update(add)
-filtered_api_methods = dict(sorted(filtered_api_methods.items(), key=lambda x: x[0][:-1]))
+    return api_methods
 
-# pprint.pprint(filtered_api_methods, sort_dicts=False)
 
-# Write the argument models Python module.
-arguments = (api_method['argument'] for api_method in filtered_api_methods.values() if api_method['argument'])
-arg_types_path = Path('toshling/models/argument_types.py')
-arg_types_path.write_text(statham.serializers.python.serialize_python(*arguments))
+def filter_api_methods(api_methods: ListAPIMethods) -> DictAPIMethods:
+    """Filter API Methods to discard, modify or add as needed"""
+    # Toshl has a lot of duplicate method/endpoint pairs, lots of which are invalid.
+    # We will take only those with the longest crumbs
+    # (which usually means there is a verb on the end).
+    # Also discard/modify/add methods we know need modifying.
+    discard: Set[Crumb] = {
+        ('accounts', 'account'),
+        ('budgets', 'budget'),
+        ('categories', 'category'),
+        ('entries', 'entry'),
+        ('entries', 'locations', 'location'),
+        ('entries', 'transactions'),
+        ('entries', 'transactions', 'repeats', 'repeating transactions'),
+        ('entries', 'transaction_pair'),
+        ('months', 'month')
+    }
+    modify: DictAPIMethods = {}
+    add: DictAPIMethods = {}
+
+    seen: Set[Tuple[str, str]] = set()
+    filtered_api_methods: DictAPIMethods = {}
+    sorted_apis = sorted(api_methods, key=lambda x: (x[2].split('?')[0], x[1], -len(x[0])))
+    for crumbs, method, href, arg, ret in sorted_apis:
+        key = (href.split('?')[0], method)
+        if key not in seen and crumbs not in discard:
+            api_method = {'method': method, 'href': href, 'argument': arg, 'return': ret}
+            api_method.update(modify.get(crumbs, {}))
+            filtered_api_methods[crumbs] = api_method
+        seen.add(key)
+    filtered_api_methods.update(add)
+    # FIXME: Dictionary are not sorted ...
+    # we might consider using SortedDict or change design
+    filtered_api_methods = dict(
+        sorted(filtered_api_methods.items(), key=lambda x: x[0][:-1])
+        )
+    return filtered_api_methods
 
 
 # Automatically generate Python code for the endpoints.
@@ -302,15 +299,70 @@ def get_classes(filtered_api_methods) -> Classes:
     return classes
 
 
-end_tmp = Path('_endpoints.py.j2')
-template = Template(end_tmp.read_text())
-end_out = Path('toshling/_endpoints.py')
-classes = get_classes(filtered_api_methods)
+def main(update_json: bool = True):
+    # After downloading the schema from Toshl API we will have to do some cleaning
+    # (some types need to be modified, some json are missing, etc.)
+    original_schema_path = Path('schemas/original/')
+    fixed_schema_path = Path('schemas/fixed')
 
-def key_sort_class_name(dict_class: Dict[str, Any]) -> List[str]:
-    """Sort Classes alphabetically, with dependance on sub-classes"""
-    crumbs = re.findall(r"[A-Z][a-z0-9]+", dict_class["name"])
-    return crumbs if len(crumbs) > 1 else [crumbs[0], "zzz"]
+    if update_json:
+        shutil.rmtree('schemas/', ignore_errors=True)
+        print("... Downloading JSON schema: please wait ...")
+        download_schema(original_schema_path)
+        print(f"Downloaded JSON schemas in {original_schema_path}")
+        fix_schema(original_schema_path, fixed_schema_path)
+        print(f"Fixed JSON schemas in {fixed_schema_path}")
 
-classes_sorted = sorted(classes.values(), key=key_sort_class_name)
-end_out.write_text(template.render(classes=classes_sorted))
+    schema = get_python_schema(fixed_schema_path)
+
+    returns = statham.schema.parser.parse(schema)
+    returns_path = Path('toshling/models/return_types.py')
+    returns_path.write_text(statham.serializers.python.serialize_python(*returns))
+    print(f"Updated Returned types in {returns_path}")
+
+    # Iterate the LDOs from all schemas, with the aim of
+    # automatically discovering all API methods
+    filtered_api_methods = filter_api_methods(get_api_methods(schema))
+    # pprint.pprint(filtered_api_methods, sort_dicts=False)
+
+    # Write the argument models Python module.
+    arguments = (
+        api_method['argument']
+        for api_method in filtered_api_methods.values()
+        if api_method['argument']
+    )
+    arg_types_path = Path('toshling/models/argument_types.py')
+    arg_types_content = statham.serializers.python.serialize_python(*arguments)  # type:ignore
+    arg_types_path.write_text(arg_types_content)
+    print(f"Updated Argument Types in {arg_types_path}")
+
+
+    def key_sort_class_name(dict_class: Dict[str, Any]) -> List[str]:
+        """Sort Classes alphabetically, with dependance on sub-classes"""
+        crumbs = re.findall(r"[A-Z][a-z0-9]+", dict_class["name"])
+        return crumbs if len(crumbs) > 1 else [crumbs[0], "zzz"]
+
+    end_tmp = Path('_endpoints.py.j2')
+    template = Template(end_tmp.read_text())
+    end_out = Path('toshling/_endpoints.py')
+
+    classes = get_classes(filtered_api_methods)
+    classes_sorted = sorted(classes.values(), key=key_sort_class_name)
+    end_out.write_text(template.render(classes=classes_sorted))
+    print(f"Updated Endpoints in {end_out}")
+
+    print("=> GENERATION SUCCESSFUL!")
+
+
+if __name__ == "__main__":
+    p = ArgumentParser(
+        "toshling generator",
+        description="Tool to update models and endpoints for Toshling"
+    )
+    p.add_argument(
+        "--offline",
+        action="store_true",
+        help="Stay offline and used JSON files already downloaded"
+    )
+    options = p.parse_args()
+    main(update_json=not options.offline)
