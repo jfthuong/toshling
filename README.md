@@ -5,7 +5,8 @@ Toshling is an(other) implementation of a client for the [Toshl API](https://dev
 ## Installation
 
 Toshling can be installed from the PyPI using `pip`:
-```
+
+```pip
 pip install toshling
 ```
 
@@ -27,13 +28,15 @@ groceries_category = client.categories.list(search='Groceries')[0]
 everything_but_groceries = client.entries.list(account=accounts[0].id,
                                                from_='2020-12-01',
                                                to='2020-12-31', not_categories=groceries_category.id)
-client.entries.create(amount=168.43,
+client.entries.create(amount=-168.43,
                       currency={'code': 'AUD'},
                       date='2020-03-06',
                       desc='Toilet paper for COVID-19 end-of-days',
                       account=accounts[0].id,
                       category=groceries_category.id)
 ```
+
+Note that expenses shall be created with a negative amount (e.g. `-168.43`) and incomes shall be created with a positive amount.
 
 More details on the required argument types and their validation can be found in the `toshling.models.argument_types` and `toshling.models.return_types`.
 
