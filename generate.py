@@ -265,11 +265,6 @@ def filter_api_methods(api_methods: ListAPIMethods) -> DictAPIMethods:
             filtered_api_methods[crumbs] = api_method
         seen.add(key)
     filtered_api_methods.update(add)
-    # FIXME: Dictionary are not sorted ...
-    # we might consider using SortedDict or change design
-    filtered_api_methods = dict(
-        sorted(filtered_api_methods.items(), key=lambda x: x[0][:-1])
-        )
     return filtered_api_methods
 
 
@@ -326,9 +321,13 @@ def main(update_json: bool = True):
     # pprint.pprint(filtered_api_methods, sort_dicts=False)
 
     # Write the argument models Python module.
+    sorted_filtered_api_methods = (
+        value
+        for key, value in sorted(filtered_api_methods.items(), key=lambda x: x[0][:-1])
+    )
     arguments = (
         api_method['argument']
-        for api_method in filtered_api_methods.values()
+        for api_method in sorted_filtered_api_methods
         if api_method['argument']
     )
     arg_types_path = Path('toshling/models/argument_types.py')
