@@ -7,14 +7,14 @@ class Endpoint:
 {%- for class in classes %}
 
 class {{ class.name }}(Endpoint):
-    {%- if class.subclasses is defined %}
+    {%- if class.subclasses %}
     def __init__(self, client):
         super().__init__(client)
-        {%- for name, subclass in class.subclasses %}
+        {%- for name, subclass in class.subclasses | sort %}
         self.{{ name }} = {{ subclass }}(client)
         {%- endfor %}
     {% endif %}
-    {%- for method in class.methods %}
+    {%- for method in class.methods | sort(attribute='name') %}
     def {{ method.name }}(self, **kwargs):
         return self.client.request('{{ method.href }}', '{{ method.method }}'{% if method.argument %}, argument_type=argument_types.{{ method.argument }}{% endif %}{% if method.return %}, return_type=return_types.{{ method.return }}{% endif %}, **kwargs)
     {% endfor %}
