@@ -32,11 +32,9 @@ class Client:
         options = {}
 
         if argument_type:
-            # Remap kwargs (which are modified to avoid Python reserved keywords) back into
-            # the source keys of the argument object.
-            remap = {}
-            for k, v in kwargs.items():
-                remap[argument_type.properties[k].source] = v
+            # Remap kwargs (which are modified to avoid Python reserved keywords)
+            # back into the source keys of the argument object.
+            remap = {argument_type.properties[k].source: v for k, v in kwargs.items()}
 
             # Construct the argument, which will validate all kwargs.
             argument = argument_type(remap)
@@ -64,7 +62,7 @@ class Client:
                 if isinstance(plain, list):
                     return [return_type(p) for p in plain]
                 elif set(plain.keys()).issubset(set(p.source for p in return_type.properties.values())):
-                    return return_type(response.json())
+                    return return_type(plain)
                 elif isinstance(plain, dict):
                     return {k: return_type(v) for k, v in plain.items()}
                 else:

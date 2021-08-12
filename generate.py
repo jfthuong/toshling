@@ -302,7 +302,7 @@ def get_classes(filtered_api_methods) -> Classes:
     return classes
 
 
-end_tmp = Path('_endpoints.py.tmpl')
+end_tmp = Path('_endpoints.py.j2')
 template = Template(end_tmp.read_text())
 end_out = Path('toshling/_endpoints.py')
 classes = get_classes(filtered_api_methods)
